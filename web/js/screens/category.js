@@ -3,7 +3,8 @@ import { icon, glyph } from '../lib/icons.js';
 import { categoryRing, paceChart, monthBars } from '../lib/charts.js';
 import { row, dueIn } from '../lib/budget.js';
 import { fmt, money, ord, dayMon, dayMonth, wdDayMonth } from '../lib/format.js';
-import { Back, Figure, TxRow } from '../ui.js';
+import { ruleWhere } from '../lib/rules.js';
+import { Back, Figure, TxRow, chevR } from '../ui.js';
 
 export function Category({ app, id }) {
   const { model, md, state: s } = app;
@@ -42,6 +43,9 @@ export function Category({ app, id }) {
   const showPace = md.cur && !c.fixed && today > 1;
   const nextPeriod = model.periods[mi + 1];
   const payee = txs[0] ? txs[0].merchant : model.txns.find(t => t.cat === c.id)?.merchant;
+  const rules = app.data.rules.filter(r => r.cat === c.id);
+  const catchAll = app.data.settings.fallback === c.id;
+  const editRules = () => app.push({ t: 'edit', id: c.id });
 
   return html`
   <div>
@@ -91,6 +95,17 @@ export function Category({ app, id }) {
       <div class="section" style="margin-top:28px"><h2>${M.n}</h2><div class="aside">${txs.length ? (txs.length === 1 ? '1 payment' : txs.length + ' payments') : ''}</div></div>
       ${txs.map(t => html`<${TxRow} key=${t.id} t=${t} cats=${model.cats} plain onOpen=${tid => app.push({ t: 'txn', id: tid })} />`)}
       ${!txs.length && html`<p class="callout" style="padding:16px 0;line-height:1.4">${md.fut ? 'No payments yet.' : `Nothing spent on ${name} in ${M.n}${md.cur ? ' so far' : ''}.`}</p>`}
+
+      <div class="section" style="margin-top:28px"><h2>Rules</h2><div class="aside"><button onClick=${editRules} style="font-size:15px;color:var(--ink)">${rules.length ? 'Edit' : 'Add'}</button></div></div>
+      ${rules.map(r => html`
+        <button key=${r.id} class="tx-row plain" onClick=${editRules}>
+          <div style="min-width:0"><div class="m">“${r.pattern}”</div><div class="sub">${ruleWhere(r)}</div></div>
+          <div class="ink3">${chevR()}</div>
+        </button>`)}
+      ${(!rules.length || catchAll) && html`<p class="callout" style="padding:12px 0;line-height:1.4">${[
+        !rules.length && `No rules yet, so payments land in ${c.name} only when you pick it.`,
+        catchAll && 'Payments that no rule matches are filed here too.',
+      ].filter(Boolean).join(' ')}</p>`}
     </div>
   </div>`;
 }

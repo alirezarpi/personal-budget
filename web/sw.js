@@ -1,10 +1,10 @@
 // App shell cache so Monat opens without a connection. The data itself is kept by the page
 // (last good /api/state in localStorage); API calls always go to the network.
-const VERSION = 'monat-v4';
+const VERSION = 'monat-v5';
 const SHELL = [
   '/', '/css/app.css', '/manifest.webmanifest', '/icons/apple-touch-icon.png', '/icons/icon-192.png',
   '/js/app.js', '/js/ui.js', '/js/vendor/preact-htm.js',
-  '/js/lib/format.js', '/js/lib/icons.js', '/js/lib/charts.js', '/js/lib/budget.js',
+  '/js/lib/format.js', '/js/lib/icons.js', '/js/lib/charts.js', '/js/lib/budget.js', '/js/lib/rules.js',
   '/js/screens/home.js', '/js/screens/category.js', '/js/screens/transactions.js', '/js/screens/inbox.js',
   '/js/screens/txn.js', '/js/screens/budgets.js', '/js/screens/settings.js', '/js/screens/login.js',
 ];

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth, db, sync
-from .categorize import suggest
+from .categorize import FIELDS, learn_pattern, matches, matching, norm, recategorize, suggest
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 COLORS = {"rent", "groc", "car", "eat", "subs", "health", "misc", "x"}
@@ -129,17 +129,21 @@ def state(conn) -> dict:
         for r in conn.execute("SELECT * FROM categories ORDER BY position, rowid")
     ]
     cat_ids = [c["id"] for c in cats]
-    rules = {r["merchant_key"]: r["category_id"] for r in conn.execute("SELECT * FROM rules")}
+    rules = [dict(r) for r in conn.execute("SELECT * FROM category_rules ORDER BY id")]
+    fallback = db.get_setting(conn, "fallback")
     txns = []
     for r in conn.execute("SELECT * FROM transactions ORDER BY date DESC, time DESC"):
         t = dict(r)
-        key = db.merchant_key(t["raw"])
+        out_ = t["amount"] < 0
+        learn = learn_pattern(t) if out_ else None
         txns.append({
             "id": t["id"], "date": t["date"], "time": t["time"] or "", "booked": t["booked"], "amount": t["amount"],
             "merchant": t["merchant"], "raw": t["raw"], "purpose": t["purpose"], "method": t["method"], "iban": t["iban"],
-            "cat": t["category_id"], "note": t["note"],
-            "learned": t["category_id"] is not None and rules.get(key) == t["category_id"],
-            "suggest": suggest(t, rules, cat_ids) if t["category_id"] is None and t["amount"] < 0 else [],
+            "cat": t["category_id"], "note": t["note"], "source": t["cat_source"], "rule": t["cat_rule"],
+            "learn": {"field": learn[0], "pattern": learn[1]} if learn else None,
+            # A rule of its own category matches it, so "Always file this way" is on.
+            "learned": t["category_id"] is not None and any(r["category_id"] == t["category_id"] and matches(r, t) for r in rules),
+            "suggest": suggest(t, rules, cat_ids, fallback) if t["category_id"] is None and out_ else [],
         })
     notifs = [dict(r) for r in conn.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 200")]
     for n in notifs:
@@ -150,6 +154,8 @@ def state(conn) -> dict:
         "sync_minutes": int(sync.INTERVAL.total_seconds() // 60),
         "cooldown_minutes": int(sync.COOLDOWN.total_seconds() // 60),
         "categories": cats,
+        "rules": [{"id": r["id"], "cat": r["category_id"], "field": r["field"], "pattern": r["pattern"],
+                   "min": r["min_amount"], "max": r["max_amount"]} for r in rules],
         "transactions": txns,
         "notifications": notifs,
         "settings": {k: db.get_setting(conn, k) for k in db.DEFAULT_SETTINGS},
@@ -174,39 +180,53 @@ class TxnPatch(BaseModel):
     remember: Optional[bool] = None
 
 
+def _rules_matching(conn, t, cat) -> list[dict]:
+    rules = [dict(r) for r in conn.execute("SELECT * FROM category_rules WHERE category_id = ?", (cat,))]
+    return matching(rules, dict(t))
+
+
 @app.patch("/api/transactions/{tid}")
 def patch_transaction(tid: str, body: TxnPatch):
+    """Changing a category by hand pins it. `remember` adds a rule for the merchant to the category
+    (true) or removes the rules that file it there (false); either way past payments are refiled."""
     with db.tx() as conn:
         t = conn.execute("SELECT * FROM transactions WHERE id = ?", (tid,)).fetchone()
         if not t:
             raise HTTPException(404, "No such transaction")
-        key = db.merchant_key(t["raw"])
         cat = t["category_id"]
+        if body.remember is False and cat:
+            ids = [r["id"] for r in _rules_matching(conn, t, cat)]
+            conn.executemany("DELETE FROM category_rules WHERE id = ?", [(i,) for i in ids])
         if body.set_category:
             cat = body.category
             if cat is not None and not conn.execute("SELECT 1 FROM categories WHERE id = ?", (cat,)).fetchone():
                 raise HTTPException(400, "No such category")
-            conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (cat, tid))
+            conn.execute("UPDATE transactions SET category_id = ?, cat_source = 'manual', cat_rule = NULL WHERE id = ?", (cat, tid))
         if body.note is not None:
             conn.execute("UPDATE transactions SET note = ? WHERE id = ?", (body.note[:2000], tid))
+        if body.remember and cat and t["amount"] < 0 and not _rules_matching(conn, t, cat):
+            learn = learn_pattern(dict(t))
+            if not learn:
+                raise HTTPException(400, "This payment doesn’t name a merchant, so there’s nothing to remember.")
+            field, pattern = learn
+            # The same rule elsewhere would compete with this one, so it moves here.
+            for r in conn.execute("SELECT id, field, pattern FROM category_rules WHERE min_amount IS NULL AND max_amount IS NULL").fetchall():
+                if r["field"] == field and norm(r["pattern"]) == norm(pattern):
+                    conn.execute("DELETE FROM category_rules WHERE id = ?", (r["id"],))
+            conn.execute("INSERT INTO category_rules(category_id, field, pattern) VALUES (?, ?, ?)", (cat, field, pattern))
+        moved = recategorize(conn) if body.remember is not None else 0
+        s = state(conn)
+        if moved:
+            s["message"] = f"{moved} other {'payment' if moved == 1 else 'payments'} filed again."
+        return s
 
-        rule = conn.execute("SELECT category_id FROM rules WHERE merchant_key = ?", (key,)).fetchone()
-        remember = body.remember
-        if remember is None and body.set_category and rule:
-            remember = True  # a learned merchant follows its transaction to the new category
-        if remember and cat:
-            conn.execute(
-                "INSERT INTO rules(merchant_key, category_id) VALUES (?, ?)"
-                " ON CONFLICT(merchant_key) DO UPDATE SET category_id = excluded.category_id",
-                (key, cat),
-            )
-            # File the merchant's other unsorted payments the same way.
-            for other in conn.execute("SELECT id, raw FROM transactions WHERE category_id IS NULL AND amount < 0").fetchall():
-                if db.merchant_key(other["raw"]) == key:
-                    conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (cat, other["id"]))
-        elif remember is False or (remember and not cat):
-            conn.execute("DELETE FROM rules WHERE merchant_key = ?", (key,))
-        return state(conn)
+
+class RuleIn(BaseModel):
+    id: Optional[int] = None
+    field: str = "any"
+    pattern: str = Field(min_length=1, max_length=80)
+    min: Optional[float] = Field(default=None, ge=0, le=1_000_000)
+    max: Optional[float] = Field(default=None, ge=0, le=1_000_000)
 
 
 class CategoryIn(BaseModel):
@@ -218,11 +238,47 @@ class CategoryIn(BaseModel):
     color: str
     icon: str
     carry: bool = False
+    rules: Optional[list[RuleIn]] = Field(default=None, max_length=200)   # None leaves the rules alone
+    catch_all: Optional[bool] = None
 
 
 def _check(c: CategoryIn):
     if c.color not in COLORS or c.icon not in ICONS:
         raise HTTPException(400, "Unknown color or icon")
+    for r in c.rules or []:
+        if r.field not in FIELDS:
+            raise HTTPException(400, "Unknown rule field")
+        if len(norm(r.pattern)) < 2:
+            raise HTTPException(400, f"“{r.pattern}” is too short for a rule. Use at least two letters or digits.")
+        if r.min is not None and r.max is not None and r.min > r.max:
+            raise HTTPException(400, f"In the rule for “{r.pattern}”, the lowest amount is above the highest.")
+
+
+def _save_rules(conn, cid: str, body: CategoryIn) -> dict:
+    """Store the category's rules and catch-all flag, refile past payments, and return the state with a
+    sentence about what moved."""
+    if body.rules is not None:
+        keep = {r.id for r in body.rules if r.id}
+        for (rid,) in conn.execute("SELECT id FROM category_rules WHERE category_id = ?", (cid,)).fetchall():
+            if rid not in keep:
+                conn.execute("DELETE FROM category_rules WHERE id = ?", (rid,))
+        for r in body.rules:
+            vals = (r.field, r.pattern.strip(), r.min, r.max)
+            cur = conn.execute("UPDATE category_rules SET field = ?, pattern = ?, min_amount = ?, max_amount = ? WHERE id = ? AND category_id = ?",
+                               (*vals, r.id, cid)) if r.id else None
+            if not cur or not cur.rowcount:
+                conn.execute("INSERT INTO category_rules(field, pattern, min_amount, max_amount, category_id) VALUES (?, ?, ?, ?, ?)", (*vals, cid))
+    if body.catch_all is not None:
+        current = db.get_setting(conn, "fallback")
+        if body.catch_all:
+            db.set_setting(conn, "fallback", cid)
+        elif current == cid:
+            db.set_setting(conn, "fallback", None)
+    moved = recategorize(conn)
+    s = state(conn)
+    if moved:
+        s["message"] = f"{body.name} saved. {moved} {'payment' if moved == 1 else 'payments'} filed again."
+    return s
 
 
 @app.post("/api/categories")
@@ -239,7 +295,7 @@ def create_category(body: CategoryIn):
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (cid, body.name, body.limit, body.thr, body.fixed, body.due, body.color, body.icon, body.carry, pos),
         )
-        return state(conn)
+        return _save_rules(conn, cid, body)
 
 
 @app.put("/api/categories/{cid}")
@@ -253,13 +309,19 @@ def update_category(cid: str, body: CategoryIn):
         )
         if not cur.rowcount:
             raise HTTPException(404, "No such category")
-        return state(conn)
+        return _save_rules(conn, cid, body)
 
 
 @app.delete("/api/categories/{cid}")
 def delete_category(cid: str):
+    """Its rules go with it. Its payments are filed again by the other rules or the catch-all;
+    if it was the catch-all, unmatched payments wait for a category."""
     with db.tx() as conn:
+        conn.execute("UPDATE transactions SET cat_source = NULL, cat_rule = NULL WHERE category_id = ?", (cid,))
         conn.execute("DELETE FROM categories WHERE id = ?", (cid,))
+        if db.get_setting(conn, "fallback") == cid:
+            db.set_setting(conn, "fallback", None)
+        recategorize(conn)
         return state(conn)
 
 

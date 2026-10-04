@@ -59,7 +59,8 @@ export function buildModel(data) {
 export function row(model, c, spent, pi, open) {
   const M = model.periods[pi], isCur = pi === model.CUR;
   const p = c.limit ? spent / c.limit : 0;
-  const st = c.fixed ? (spent >= c.limit - 0.005 ? 'settled' : 'due') : p > 1.00001 ? 'over' : p * 100 >= c.thr ? 'close' : 'ok';
+  // A fixed cost is paid once its payment lands, even a few cents under the limit.
+  const st = c.fixed ? (spent > 0.005 ? 'settled' : 'due') : p > 1.00001 ? 'over' : p * 100 >= c.thr ? 'close' : 'ok';
   const left = c.limit - spent;
   const paid = st === 'settled' ? model.txnsIn(M, t => t.cat === c.id)[0] : null;
   const dueDate = dueIn(M, c.due);

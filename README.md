@@ -102,7 +102,14 @@ docker compose exec monat python -c "import sqlite3; sqlite3.connect('/data/mona
   app from your server, and the button shows when it's available again. The open app refreshes every 5 minutes.
 - **Card payments:** ING books them the next business day, so a card payment appears with the first sync after
   ING books it, not at the till.
-- **Learned merchants:** new payments from a merchant you've sorted before are filed automatically.
+- **Rules:** each category has rules (Budgets → a category → Rules): a word or phrase to find in the payee, the
+  purpose text or either, optionally only within an amount range. Payments that match are filed automatically, past
+  ones included, and every rule change refiles them. If rules in two categories match, the more specific one wins
+  (an amount range, then a single field, then the longer phrase). A category picked by hand is never changed.
+  "Always file this way" adds a payee rule for the merchant; for PayPal it uses the shop named in the purpose.
+- **Catch-all:** one category (Misc by default) can catch every payment no rule matches.
+- **Starting rules:** on first start after the update, categories get rules by name (Rent, Groceries, Servers, …;
+  see `RULES` in `app/seed.py`), Misc becomes the catch-all and every payment not sorted by hand is filed.
   Transfers between your own ING accounts are ignored.
 - **TAN requests:** the scheduled sync never prompts. If ING asks for a TAN, the app says so; run the `--setup`
   command again and confirm it.
@@ -124,7 +131,8 @@ that day, and fakes the sync. Delete the database file to reseed it.
 | `app/auth.py` | Password check, sessions, sign-in rate limits |
 | `app/sync.py` | FinTS fetch, MT940 → transactions, sync status |
 | `app/db.py`, `app/seed.py` | Schema, settings, default categories, demo data |
-| `app/categorize.py` | Inbox suggestions and learned merchant rules |
+| `app/categorize.py` | Filing rules: matching, the catch-all, refiling, inbox suggestions |
+| `web/js/lib/rules.js` | The same matching in the browser, for the rule editor's live preview |
 | `web/js/lib/budget.js` | Budget months (including payday months), category states, safe to spend, summary copy |
 | `web/js/lib/charts.js` | Month ring, category ring, pace chart, 6-month bars |
 | `web/js/screens/` | One module per screen |

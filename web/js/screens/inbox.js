@@ -14,7 +14,7 @@ export function Inbox({ app }) {
     <${Back} label=${app.backLabel} onClick=${app.pop} />
     <div class="pad">
       <h1 class="large-title" style="margin-top:4px">Uncategorized</h1>
-      <p class="callout" style="margin-top:4px;line-height:1.4;text-wrap:pretty">Swipe right to accept the suggestion, or tap a category. Monat files the merchant automatically next time.</p>
+      <p class="callout" style="margin-top:4px;line-height:1.4;text-wrap:pretty">Swipe right to accept the suggestion, or tap a category. Monat adds a rule, so the merchant files itself next time.</p>
     </div>
     <div style="margin-top:18px;border-top:0.5px solid var(--line)">
       ${items.map(t => {
@@ -24,7 +24,7 @@ export function Inbox({ app }) {
         const ex = s.expanded[t.id];
         const dx = s.swipe && s.swipe.id === t.id ? s.swipe.dx : 0;
         const chipCats = ex ? model.cats : sugg;
-        const rem = s.remember[t.id] !== false;
+        const rem = s.remember[t.id] !== false && !!t.learn;
         const drag = dragX(app.gest, 'inbox', {
           onMove: d => app.set({ swipe: { id: t.id, dx: Math.max(0, Math.min(d, 220)) } }),
           onEnd: () => { if ((app.state.swipe?.dx || 0) > 100) app.assign(t.id, top.id); else app.set({ swipe: null }); },
@@ -50,10 +50,11 @@ export function Inbox({ app }) {
               })}
               ${!ex && html`<button class="chip" onClick=${() => app.set({ expanded: { ...s.expanded, [t.id]: true } })}><span>Other…</span></button>`}
             </div>
+            ${t.learn && html`
             <div style="display:flex;align-items:center;justify-content:space-between;min-height:44px;border-top:0.5px solid var(--line);margin-top:4px">
               <div class="label">Always file ${shortName(t.merchant)} this way</div>
               <${Toggle} on=${rem} label=${`Always file ${shortName(t.merchant)} this way`} onClick=${() => app.set({ remember: { ...s.remember, [t.id]: !rem } })} />
-            </div>
+            </div>`}
           </div>
         </div>`;
       })}

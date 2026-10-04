@@ -22,6 +22,7 @@ import threading
 from datetime import date, datetime, timedelta
 
 from . import db
+from .categorize import INTERMEDIARIES, paypal_merchant, recategorize
 
 log = logging.getLogger("monat.sync")
 INTERVAL = timedelta(minutes=max(15, int(os.getenv("SYNC_INTERVAL_MINUTES", "120"))))
@@ -130,8 +131,11 @@ METHODS = {"LASTSCHRIFT": "Direct debit", "DAUERAUFTRAG": "Standing order", "GUT
 LEGAL = {"GMBH": "GmbH", "AG": "AG", "SE": "SE", "KG": "KG", "UG": "UG", "EV": "e.V.", "E.V.": "e.V."}
 
 
-def _merchant(name: str) -> str:
-    """'VISA NETFLIX.COM' → 'Netflix.com', 'REWE MARKT GMBH//BERLIN/DE' → 'Rewe Markt GmbH'."""
+def _merchant(name: str, purpose: str = "") -> str:
+    """'VISA NETFLIX.COM' → 'Netflix.com', 'REWE MARKT GMBH//BERLIN/DE' → 'Rewe Markt GmbH',
+    PayPal → the shop named in the purpose ('Hetzner Online GmbH')."""
+    if INTERMEDIARIES.match(name.upper()):
+        name = paypal_merchant(purpose) or name
     name = re.sub(r"^(VISA|GIROCARD)\s+", "", name.split("//")[0].strip(), flags=re.I)
     if not name.isupper() or len(name) <= 4:
         return name
@@ -140,6 +144,8 @@ def _merchant(name: str) -> str:
 
 def _method(posting: str, text: str) -> str:
     up = text.upper()
+    if INTERMEDIARIES.match(up):
+        return "PayPal" if up.startswith("PAYPAL") else "Klarna"
     if "VISA" in up:
         return "Visa Debit"
     if "KARTENZAHLUNG" in up or "GIROCARD" in up:
@@ -147,7 +153,13 @@ def _method(posting: str, text: str) -> str:
     return METHODS.get(posting.upper().strip(), posting.strip().capitalize())
 
 
-def to_rows(results, rules: dict) -> list[tuple]:
+def name_paypal_merchants(conn):
+    """Show PayPal payments under the shop that was paid, for payments synced before Monat did that."""
+    for t in conn.execute("SELECT id, raw, purpose FROM transactions WHERE raw LIKE 'PAYPAL%'").fetchall():
+        conn.execute("UPDATE transactions SET merchant = ?, method = 'PayPal' WHERE id = ?", (_merchant(t["raw"], t["purpose"]), t["id"]))
+
+
+def to_rows(results) -> list[tuple]:
     own = {iban for iban, _ in results}
     rows, seen = [], {}
     for iban, txs in results:
@@ -170,9 +182,8 @@ def to_rows(results, rules: dict) -> list[tuple]:
             n = seen[base] = seen.get(base, 0) + 1
             tid = hashlib.sha1(f"{base}|{n}".encode()).hexdigest()[:16]
             pretty_iban = " ".join(cp_iban[i:i + 4] for i in range(0, len(cp_iban), 4)) if cp_iban else None
-            cat = rules.get(db.merchant_key(raw)) if amount < 0 else None
-            rows.append((tid, day.isoformat(), time, booked.isoformat(), amount, _merchant(raw), raw.upper(), purpose,
-                         _method(d.get("posting_text") or "", f"{raw} {purpose}"), pretty_iban, cat))
+            rows.append((tid, day.isoformat(), time, booked.isoformat(), amount, _merchant(raw, purpose), raw.upper(), purpose,
+                         _method(d.get("posting_text") or "", f"{raw} {purpose}"), pretty_iban))
     return rows
 
 
@@ -241,15 +252,15 @@ def run(interactive: bool = False, manual: bool = False, cooldown: bool = True, 
             return msg
 
         with db.tx() as conn:
-            rules = {r["merchant_key"]: r["category_id"] for r in conn.execute("SELECT * FROM rules")}
-            rows = to_rows(results, rules)
+            rows = to_rows(results)
             before = conn.total_changes
             conn.executemany(
-                "INSERT OR IGNORE INTO transactions(id, date, time, booked, amount, merchant, raw, purpose, method, iban, category_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO transactions(id, date, time, booked, amount, merchant, raw, purpose, method, iban)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             new = conn.total_changes - before
+            recategorize(conn)
             if results:
                 iban = results[0][0]
                 db.set_setting(conn, "account", {"name": os.getenv("FINTS_ACCOUNT_NAME", "Girokonto"),

@@ -1,10 +1,10 @@
-"""Default categories, plus the demo month from the Claude Design file (MONAT_DEMO=1)."""
+"""Default categories and filing rules, plus the demo month from the Claude Design file (MONAT_DEMO=1)."""
 
 import random
 from calendar import monthrange
 from datetime import date, timedelta
 
-from .db import set_setting
+from .db import DEMO, set_setting
 
 CATEGORIES = [
     # id, name, limit, threshold, fixed, due_day, color, icon, carry
@@ -24,6 +24,66 @@ def categories(conn):
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(*c, i) for i, c in enumerate(CATEGORIES)],
     )
+
+
+# Starting rules, by category name, so they reach categories made in the app too. Most come from
+# real ING statements (June–September 2026); the rest are common German merchants.
+# (field, phrase, min €, max €)
+RULES = {
+    "RENT": [("payee", "I-99 Immobilien"), ("payee", "Hausverwaltung"), ("purpose", "Miete")],
+    "GROCERIES": [("payee", p) for p in ("REWE", "Lidl", "Edeka", "Aldi", "Netto", "Penny", "Kaufland", "Knuspr",
+                                         "Tchibo", "Bio Company", "Denns", "dm Drogerie", "Rossmann")],
+    "EATING OUT": [("payee", p) for p in ("Lieferando", "Wolt", "Restaurant", "Cafe", "Kaffee", "Coffee", "Starbucks",
+                                          "Baecker", "Backstube", "Hoflinger", "Wuensche", "Sushi", "Pizz", "Burger",
+                                          "Doener", "Imbiss", "Icecream", "True und 12", "Schlosswirtsch",
+                                          "Bab al Yemen", "Tollwood")],
+    "CAR FUEL": [("payee", p, 20, None) for p in ("Tankstelle", "Aral", "Shell", "Esso", "Avia", "Agip", "TotalEnergies", "OMV")],
+    "CAR SHARING": [("payee", p) for p in ("Miles Mobility", "Free2move", "Sixt", "Share Now")],
+    "CAR INSURANCE": [("any", "Kfz-Vers"), ("any", "Kraftfahrtvers"), ("any", "Autoversicherung")],
+    "CAR LOAN": [("any", "Autokredit"), ("any", "Darlehen")],
+    "CAR": [("payee", p) for p in ("Tankstelle", "Aral", "Shell", "Esso", "Avia", "Agip", "APCOA", "ADAC")],
+    "ARD ZDF": [("payee", "Rundfunk"), ("any", "ARD ZDF")],
+    "LAWYER INSURANCE": [("payee", "ARAG"), ("purpose", "Rechtsschutz")],
+    "INTERNET": [("payee", "1+1 Telecom")],
+    "PHONE": [("payee", "Telekom Deutschland"), ("purpose", "Mobilfunk")],
+    "GYM": [("payee", "RSG Group"), ("any", "McFit")],
+    "CLAUDE": [("any", "Anthropic")],
+    "SERVERS": [("any", "Hetzner"), ("any", "IONOS"), ("any", "GoDaddy")],
+    "INVESTMENT": [("purpose", "Personal-Finance")],
+    "SUBSCRIPTIONS": [("payee", p) for p in ("Netflix", "Spotify", "Apple.com", "Disney", "Audible", "Amazon Prim")],
+    "HEALTH": [("payee", p) for p in ("Apotheke", "Arzt", "Praxis", "Zahn")],
+}
+
+
+def rules(conn):
+    """Once per database: give categories their starting rules, make Misc the catch-all and file
+    everything that isn't sorted by hand."""
+    from . import sync
+    from .categorize import learn_pattern, norm, recategorize
+
+    # Before rules existed, a category was set by hand or by a learned merchant; treat both as by hand.
+    conn.execute("UPDATE transactions SET cat_source = 'manual' WHERE category_id IS NOT NULL AND cat_source IS NULL")
+    by_name = {norm(r["name"]): r["id"] for r in conn.execute("SELECT id, name FROM categories")}
+    add = []
+    for name, rs in RULES.items():
+        if name in by_name:
+            add += [(by_name[name], r[0], r[1], *(r[2:] or (None, None))) for r in rs]
+    # Merchants learned before rules existed become payee rules.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rules'").fetchone():
+        for old in conn.execute("SELECT merchant_key, category_id FROM rules").fetchall():
+            t = conn.execute("SELECT raw, purpose FROM transactions WHERE category_id = ? AND upper(raw) LIKE ?",
+                             (old["category_id"], old["merchant_key"].split()[0] + "%")).fetchone()
+            field, pattern = (learn_pattern(dict(t)) if t else None) or ("payee", old["merchant_key"])
+            add.append((old["category_id"], field, pattern, None, None))
+        conn.execute("DROP TABLE rules")
+    conn.executemany("INSERT INTO category_rules(category_id, field, pattern, min_amount, max_amount) VALUES (?, ?, ?, ?, ?)", add)
+    misc = by_name.get("MISC") or ("misc" if "misc" in by_name.values() else None)
+    if misc and not DEMO:  # the demo keeps its three unsorted payments from the design
+        set_setting(conn, "fallback", misc)
+    sync.name_paypal_merchants(conn)
+    if not DEMO:
+        recategorize(conn)
+    set_setting(conn, "rules_seeded", True)
 
 
 def card_purpose(raw, d: date, time, method):
@@ -132,7 +192,6 @@ def demo(conn):
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
-    conn.execute("INSERT INTO rules(merchant_key, category_id) VALUES ('REWE MARKT GMBH', 'groc')")
     conn.execute("UPDATE transactions SET note = 'Weekly shop, incl. drinks for Saturday' WHERE id = 't4'")
 
     notifications = [

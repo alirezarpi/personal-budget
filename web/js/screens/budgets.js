@@ -1,7 +1,8 @@
 import { html } from '../vendor/preact-htm.js';
 import { icon, glyph, CATEGORY_COLORS, CATEGORY_ICONS, colorVar } from '../lib/icons.js';
-import { money, ord } from '../lib/format.js';
-import { Back, Toggle, Seg, Figure, chevR } from '../ui.js';
+import { money, ord, list } from '../lib/format.js';
+import { FIELDS, ruleWhere, preview, parseAmount } from '../lib/rules.js';
+import { Toggle, Seg, Figure, chevR } from '../ui.js';
 
 export function Budgets({ app }) {
   const { model } = app;
@@ -25,7 +26,7 @@ export function Budgets({ app }) {
       ${cats.map(c => html`
         <button key=${c.id} onClick=${() => app.push({ t: 'edit', id: c.id })} style="display:grid;grid-template-columns:28px 1fr auto 16px;column-gap:12px;align-items:center;min-height:62px;border-bottom:0.5px solid var(--line);width:100%">
           <div>${icon(c.icon, c.colorVar, 24)}</div>
-          <div><div style="font-size:17px;font-weight:500">${c.name}</div><div class="label" style="margin-top:1px">${c.fixed ? `Fixed cost · due on the ${ord(c.due)}` : `Alert at ${c.thr}%` + (c.carry ? ' · unused carries over' : '')}</div></div>
+          <div><div style="font-size:17px;font-weight:500">${c.name}</div><div class="label" style="margin-top:1px">${budgetSub(c, app)}</div></div>
           <div style="font-size:17px;font-weight:600">${money(c.limit)}</div>
           <div class="ink3">${chevR()}</div>
         </button>`)}
@@ -37,6 +38,54 @@ export function Budgets({ app }) {
   </div>`;
 }
 
+function budgetSub(c, app) {
+  const n = app.data.rules.filter(r => r.cat === c.id).length;
+  const rules = app.data.settings.fallback === c.id ? 'catches the rest' : n ? (n === 1 ? '1 rule' : `${n} rules`) : '';
+  return [c.fixed ? `Fixed cost · due on the ${ord(c.due)}` : `Alert at ${c.thr}%`, !c.fixed && c.carry && 'unused carries over', rules].filter(Boolean).join(' · ');
+}
+
+const inputStyle = 'display:block;width:100%;box-sizing:border-box;height:44px;border:0;border-bottom:0.5px solid var(--line);background:transparent;font:inherit;font-size:17px;color:var(--ink);outline:none;border-radius:0';
+
+// One rule in the editor: a summary row, and when open, its fields and what it would catch.
+function RuleRow({ app, d, r, set }) {
+  const open = d.openRule === r.key;
+  const parsed = { ...r, min: parseAmount(r.min), max: parseAmount(r.max) };
+  const pv = r.pattern.trim() ? preview(parsed, app.model.txns) : null;
+  const caught = !pv ? '' : pv.n ? `${pv.n} ${pv.n === 1 ? 'payment' : 'payments'}, ${money(pv.total)}` : 'No payments match yet';
+  const upd = o => set({ rules: d.rules.map(x => x.key === r.key ? { ...x, ...o } : x) });
+  const amountInput = (k, label) => html`
+    <label style="flex:1;display:flex;align-items:center;gap:6px;border-bottom:0.5px solid var(--line);height:44px">
+      <span class="label" style="min-width:34px">${label}</span><span>€</span>
+      <input inputmode="decimal" value=${r[k]} placeholder="any" aria-label=${label + ' amount'} onInput=${e => upd({ [k]: e.target.value })}
+        style="border:0;background:transparent;font:inherit;font-size:17px;color:var(--ink);outline:none;width:100%;min-width:0" />
+    </label>`;
+  return html`
+    <div style="border-bottom:0.5px solid var(--line)">
+      <button onClick=${() => set({ openRule: open ? null : r.key })} aria-expanded=${open ? 'true' : 'false'} style="display:grid;grid-template-columns:1fr 16px;column-gap:12px;align-items:center;min-height:58px;width:100%;text-align:left;padding:6px 0;box-sizing:border-box">
+        <div style="min-width:0">
+          <div style="font-size:17px;overflow-wrap:anywhere">${r.pattern.trim() ? `“${r.pattern.trim()}”` : html`<span class="ink2">New rule</span>`}</div>
+          <div class="label" style="margin-top:1px">${[ruleWhere(parsed), caught].filter(Boolean).join(' · ')}</div>
+        </div>
+        <div class="ink3" style=${{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .2s' }}>${chevR()}</div>
+      </button>
+      ${open && html`
+        <div style="padding:0 0 14px">
+          <input value=${r.pattern} maxlength="80" placeholder="Word or phrase, e.g. Lieferando" aria-label="Word or phrase"
+            ref=${el => { if (el && !r.id && !el.dataset.focused) { el.dataset.focused = '1'; setTimeout(() => el.focus()); } }}
+            onInput=${e => upd({ pattern: e.target.value })} style=${inputStyle} />
+          <div class="label" style="margin-top:12px">Look in</div>
+          <${Seg} options=${FIELDS} value=${r.field} onPick=${v => upd({ field: v })} />
+          <div class="label" style="margin-top:12px">Only when the amount is</div>
+          <div style="display:flex;gap:16px">${amountInput('min', 'From')}${amountInput('max', 'To')}</div>
+          ${pv && pv.n > 0 && html`<p class="foot" style="margin-top:10px">Catches ${list(pv.top.slice(0, 3))}${pv.top.length > 3 ? ` and ${pv.top.length - 3} more` : ''}.</p>`}
+          <div style="display:flex;justify-content:space-between;margin-top:6px">
+            <button onClick=${() => set({ rules: d.rules.filter(x => x.key !== r.key), openRule: null })} style="min-height:44px;font-size:15px;color:var(--over)">Remove rule</button>
+            <button onClick=${() => set({ openRule: null })} style="min-height:44px;font-size:15px;font-weight:600">Done</button>
+          </div>
+        </div>`}
+    </div>`;
+}
+
 export function Edit({ app }) {
   const { state: s, md } = app;
   const d = s.draft;
@@ -46,6 +95,8 @@ export function Edit({ app }) {
   const step = d.limit >= 200 ? 10 : 5;
   const row = md.cur && md.ring.find(r => r.id === d.id);
   const nextName = app.model.periods[app.model.CUR + 1]?.n || 'next month';
+  const others = app.model.cats.find(c => c.id === app.data.settings.fallback && c.id !== d.id);
+  const addRule = () => { const key = 'n' + Date.now(); set({ rules: [...d.rules, { key, field: 'any', pattern: '', min: '', max: '' }], openRule: key }); };
   const toggles = [
     { k: 'fixed', label: 'Fixed cost', sub: 'Same amount every month. Shown as settled once paid, with no pace.' },
     { k: 'carry', label: 'Carry over unused budget', sub: row && row.left > 0 ? `${money(row.left)} unused this month would raise ${nextName}’s limit to ${money(d.limit + row.left)}.` : 'Whatever is left at month end moves to next month’s limit.' },
@@ -111,12 +162,32 @@ export function Edit({ app }) {
             </div>
           </div>`}
       </div>
+
+      <div class="section"><h2>Rules</h2><div class="aside">${d.rules.length ? (d.rules.length === 1 ? '1 rule' : d.rules.length + ' rules') : ''}</div></div>
+      <p class="foot" style="margin-top:8px">Payments that match a rule are filed here automatically, including past ones. If rules in two categories match, the more specific one wins. A category you pick by hand always stays.</p>
+      <div style="margin-top:6px;border-top:0.5px solid var(--line)">
+        ${d.rules.map(r => html`<${RuleRow} key=${r.key} app=${app} d=${d} r=${r} set=${set} />`)}
+        <button onClick=${addRule} style="display:flex;align-items:center;gap:12px;min-height:52px;border-bottom:0.5px solid var(--line);font-size:17px;width:100%">
+          ${icon('plus', 'var(--ink)', 20, 1.8)}Add rule
+        </button>
+        <div class="switch-row">
+          <div><div class="t">Catch everything else</div><div class="s">${d.catchAll ? 'Payments no rule matches are filed here.' : others ? `Now ${others.name}. Turning this on moves it here.` : 'File payments no rule matches here, instead of leaving them uncategorized.'}</div></div>
+          <${Toggle} on=${d.catchAll} label="Catch everything else" onClick=${() => set({ catchAll: !d.catchAll })} />
+        </div>
+      </div>
+
       ${!isNew && html`
         <button onClick=${app.deleteDraft} style="margin-top:28px;min-height:44px;display:flex;align-items:center;gap:8px;font-size:17px;color:var(--over);text-wrap:pretty">
-          ${s.confirmDelete ? html`${glyph('over')}<span>Tap again to delete. Its payments become uncategorized.</span>` : 'Delete category'}
+          ${s.confirmDelete ? html`${glyph('over')}<span>Tap again to delete. Its rules go too, and its payments are filed again.</span>` : 'Delete category'}
         </button>`}
     </div>
   </div>`;
 }
 
-export const blankDraft = () => ({ id: 'new', name: '', limit: 50, thr: 80, fixed: false, due: 1, color: 'x', icon: 'book', carry: false });
+export const blankDraft = () => ({ id: 'new', name: '', limit: 50, thr: 80, fixed: false, due: 1, color: 'x', icon: 'book', carry: false, rules: [], catchAll: false, openRule: null });
+
+// The editor keeps amounts as typed; each rule gets a stable key for the list.
+export const draftFor = (c, data) => ({
+  ...c, openRule: null, catchAll: data.settings.fallback === c.id,
+  rules: data.rules.filter(r => r.cat === c.id).map(r => ({ key: 'r' + r.id, id: r.id, field: r.field, pattern: r.pattern, min: r.min ?? '', max: r.max ?? '' })),
+});

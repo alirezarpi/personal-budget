@@ -1,6 +1,7 @@
 import { html } from '../vendor/preact-htm.js';
 import { icon } from '../lib/icons.js';
 import { WEEKDAYS, MONTHS, parseDate, dayDiff, wdShort, dayMon } from '../lib/format.js';
+import { fieldLabel } from '../lib/rules.js';
 import { Back, Toggle, Figure, chevR } from '../ui.js';
 
 export function Txn({ app, id }) {
@@ -18,6 +19,10 @@ export function Txn({ app, id }) {
     ...(booked ? [{ k: 'Booked', v: dayDiff(booked, model.today) === 0 ? 'Today' : `${wdShort(booked)} ${dayMon(booked)}` }] : []),
   ];
   const note = s.notes[t.id] !== undefined ? s.notes[t.id] : t.note;
+  // Why it's in this category: a rule, the catch-all, or a choice made by hand.
+  const rule = t.source === 'rule' ? app.data.rules.find(r => r.id === t.rule) : null;
+  const filedBy = !c ? null : rule ? `Rule “${rule.pattern}”` : t.source === 'fallback' ? 'Catch-all, no rule matched' : 'You';
+  const ruleCat = rule ? rule.cat : c?.id;
 
   return html`
   <div>
@@ -42,9 +47,15 @@ export function Txn({ app, id }) {
               </button>`)}
             ${t.cat && html`<button onClick=${() => app.setCategory(t.id, null)} style="display:flex;align-items:center;gap:10px;min-height:44px;font-size:17px;width:100%;color:var(--ink2)"><span style="width:20px"></span>Remove category</button>`}
           </div>`}
-        ${c && html`
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:50px;border-bottom:0.5px solid var(--line)">
-            <span style="font-size:15px;line-height:1.3">Always file ${t.merchant} under ${c.name}</span>
+        ${filedBy && html`
+          <button class="kv" disabled=${filedBy === 'You'} onClick=${() => app.push({ t: 'edit', id: ruleCat })}>
+            <span>Filed by</span>
+            <span style="display:flex;align-items:center;gap:8px">${filedBy}${filedBy !== 'You' && html`<span class="ink3">${chevR()}</span>`}</span>
+          </button>`}
+        ${c && (t.learned || t.learn) && html`
+          <div class="switch-row">
+            <div><div class="t" style="font-size:15px;line-height:1.3">Always file ${t.merchant} under ${c.name}</div>
+              <div class="s">${t.learned ? `Off removes the rules that file it under ${c.name}.` : `Adds a rule: ${fieldLabel(t.learn.field).toLowerCase()} contains “${t.learn.pattern}”.`}</div></div>
             <${Toggle} on=${t.learned} label=${`Always file ${t.merchant} under ${c.name}`} onClick=${() => app.learn(t.id, !t.learned)} />
           </div>`}
         ${fields.map(f => html`<div key=${f.k} class="kv"><span>${f.k}</span><span>${f.v}</span></div>`)}

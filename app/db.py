@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -37,12 +36,18 @@ CREATE TABLE IF NOT EXISTS transactions (
   method TEXT NOT NULL DEFAULT '',
   iban TEXT,
   category_id TEXT REFERENCES categories(id) ON DELETE SET NULL,
-  note TEXT NOT NULL DEFAULT ''
+  note TEXT NOT NULL DEFAULT '',
+  cat_source TEXT,                 -- 'manual', 'rule' or 'fallback'; NULL while nothing has filed it
+  cat_rule INTEGER                 -- the rule that filed it, when cat_source is 'rule'
 );
 CREATE INDEX IF NOT EXISTS transactions_date ON transactions(date);
-CREATE TABLE IF NOT EXISTS rules (
-  merchant_key TEXT PRIMARY KEY,
-  category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS category_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  field TEXT NOT NULL DEFAULT 'any',   -- where to look: 'any', 'payee' or 'purpose'
+  pattern TEXT NOT NULL,
+  min_amount REAL,                     -- money out, in euros; NULL means no bound
+  max_amount REAL
 );
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,18 +74,13 @@ DEFAULT_SETTINGS = {
     "month_start": 1,
     "prefs": {"approach": True, "reached": True, "over": True, "large": True, "daily": True, "sync": True},
     "account": None,
+    "fallback": None,   # the catch-all category: payments no rule matches are filed here
     "sync": {"status": "never", "last": None, "next": None},
 }
 
 
 def now() -> datetime:
     return DEMO_NOW if DEMO else datetime.now()
-
-
-def merchant_key(raw: str) -> str:
-    """Normalise a counterparty name so branches of one merchant share a rule (SHELL 1219 → SHELL)."""
-    key = re.sub(r"\d+", " ", raw.upper())
-    return re.sub(r"\s+", " ", key).strip()
 
 
 def connect() -> sqlite3.Connection:
@@ -113,13 +113,25 @@ def set_setting(conn, key, value):
     )
 
 
+def _migrate(conn):
+    """Bring a database from before category rules up to date."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(transactions)")}
+    if "cat_source" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN cat_source TEXT")
+        conn.execute("ALTER TABLE transactions ADD COLUMN cat_rule INTEGER")
+        conn.execute("UPDATE transactions SET cat_source = 'manual' WHERE category_id IS NOT NULL")
+
+
 def init():
     from . import auth, seed
 
     with tx() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         auth.init(conn)
         if not conn.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
             seed.categories(conn)
             if DEMO:
                 seed.demo(conn)
+        if not get_setting(conn, "rules_seeded"):
+            seed.rules(conn)

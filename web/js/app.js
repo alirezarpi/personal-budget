@@ -6,7 +6,8 @@ import { Category } from './screens/category.js';
 import { Transactions } from './screens/transactions.js';
 import { Inbox, shortName } from './screens/inbox.js';
 import { Txn } from './screens/txn.js';
-import { Budgets, Edit, blankDraft } from './screens/budgets.js';
+import { Budgets, Edit, blankDraft, draftFor } from './screens/budgets.js';
+import { parseAmount } from './lib/rules.js';
 import { Settings, Notifications } from './screens/settings.js';
 import { Login } from './screens/login.js';
 
@@ -80,7 +81,8 @@ class App extends Component {
   go = tab => { this.scrolls = []; this.top(); this.setState({ tab, stack: [], focus: null, picker: false, confirmDelete: false }); };
   push = e => {
     this.scrolls.push(this.scrollEl ? this.scrollEl.scrollTop : 0);
-    const draft = e.t === 'edit' ? (e.id === 'new' ? blankDraft() : { ...this.state.data.categories.find(c => c.id === e.id) }) : this.state.draft;
+    const data = this.state.data;
+    const draft = e.t === 'edit' ? (e.id === 'new' ? blankDraft() : draftFor(data.categories.find(c => c.id === e.id), data)) : this.state.draft;
     this.setState(s => ({ stack: [...s.stack, e], picker: false, confirmDelete: false, draft }), () => this.top());
   };
   pop = () => {
@@ -126,7 +128,7 @@ class App extends Component {
   assign = (id, cat) => {
     const t = this.state.data.transactions.find(x => x.id === id);
     const c = this.state.data.categories.find(x => x.id === cat);
-    const rem = this.state.remember[id] !== false;
+    const rem = this.state.remember[id] !== false && !!t.learn;
     this.optimistic(d => { d.transactions.find(x => x.id === id).cat = cat; });
     this.setState({ swipe: null });
     api('PATCH', `/api/transactions/${id}`, { category: cat, set_category: true, remember: rem }).then(data => this.setData(data), this.fail);
@@ -144,7 +146,7 @@ class App extends Component {
 
   learn = (id, on) => {
     this.optimistic(d => { d.transactions.find(x => x.id === id).learned = on; });
-    api('PATCH', `/api/transactions/${id}`, { remember: on }).then(data => this.setData(data), this.fail);
+    api('PATCH', `/api/transactions/${id}`, { remember: on }).then(data => { this.setData(data); if (data.message) this.toast(data.message); }, this.fail);
   };
 
   editNote = (id, value) => {
@@ -162,12 +164,14 @@ class App extends Component {
   saveDraft = async () => {
     const d = this.state.draft;
     const name = d.name.trim() || 'Untitled';
-    const body = { name, limit: d.limit, thr: d.fixed ? 100 : d.thr, fixed: d.fixed, due: d.due, color: d.color, icon: d.icon, carry: d.carry };
+    const rules = d.rules.filter(r => r.pattern.trim()).map(r => ({ id: r.id || null, field: r.field, pattern: r.pattern.trim(), min: parseAmount(r.min), max: parseAmount(r.max) }));
+    const body = { name, limit: d.limit, thr: d.fixed ? 100 : d.thr, fixed: d.fixed, due: d.due, color: d.color, icon: d.icon, carry: d.carry, rules, catch_all: d.catchAll };
     this.setState({ saving: true });
     try {
-      this.setData(d.id === 'new' ? await api('POST', '/api/categories', body) : await api('PUT', `/api/categories/${d.id}`, body));
+      const data = d.id === 'new' ? await api('POST', '/api/categories', body) : await api('PUT', `/api/categories/${d.id}`, body);
+      this.setData(data);
       this.pop();
-      this.toast(`${name} saved.`);
+      this.toast(data.message || `${name} saved.`);
     } catch (e) { this.toast(e.message); }
     this.setState({ saving: false });
   };
