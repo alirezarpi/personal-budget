@@ -4,11 +4,32 @@ services:
     image: monat:latest
     restart: unless-stopped
     env_file: .env
-    # Only reachable from the server itself; `tailscale serve --bg 8765` puts it on your tailnet over HTTPS.
+    # Only for checks from this machine (http://localhost:8765). The public way in is Caddy.
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
       - monat-data:/data
 
+  # Only for a server without its own reverse proxy: `docker compose --profile caddy up -d`.
+  # Behind an existing edge (like the invisibleservices landing nginx), use docker-compose.edge.yml instead.
+  caddy:
+    image: caddy:2
+    profiles: [caddy]
+    restart: unless-stopped
+    depends_on:
+      - monat
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      MONAT_DOMAIN: ${MONAT_DOMAIN:-monat.alirezarpi.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data          # certificates; keep this volume
+      - caddy-config:/config
+
 volumes:
   monat-data:
+  caddy-data:
+  caddy-config:

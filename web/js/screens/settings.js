@@ -66,6 +66,8 @@ export function Settings({ app }) {
 
     <div class="caps">Export</div>
     ${exports.map(x => html`<a key=${x.label} class="kv" href=${x.href} download style="color:inherit;text-decoration:none"><span>${x.label}</span><span>${x.fmt}</span></a>`)}
+    <div class="caps">Account</div>
+    <button class="kv" onClick=${app.signOut}><span style="color:var(--over)">Sign out</span><span></span></button>
     <p class="foot" style="margin-top:20px">Monat · Data lives on your own server and is fetched read-only from ING.</p>
   </div>`;
 }

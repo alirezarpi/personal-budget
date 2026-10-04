@@ -1,0 +1,11 @@
+# HTTPS for Monat. Caddy gets and renews the Let's Encrypt certificate for MONAT_DOMAIN by itself;
+# DNS for the domain must point at this server, with ports 80 and 443 open.
+{$MONAT_DOMAIN} {
+	encode zstd gzip
+	# Caddy replaces any X-Forwarded-* headers a client sends, so Monat sees the real client IP.
+	reverse_proxy monat:8765
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

@@ -7,12 +7,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+from urllib.parse import urlsplit
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import db, sync
+from . import auth, db, sync
 from .categorize import suggest
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -45,6 +47,77 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Monat", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+PUBLIC_API = {"/api/session", "/api/login", "/api/logout"}
+HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                               "connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
+                               "base-uri 'none'; form-action 'self'; object-src 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    """Every /api route except sign-in needs a session; changes must come from Monat's own pages."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        origin = request.headers.get("origin")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")  # as the browser saw it
+        if request.method not in ("GET", "HEAD") and origin and urlsplit(origin).netloc != host:
+            return JSONResponse({"detail": "Cross-site request refused."}, status_code=403)
+        if path not in PUBLIC_API:
+            with db.tx() as conn:
+                ok = auth.valid(conn, request.cookies.get(auth.COOKIE))
+            if not ok:
+                return JSONResponse({"detail": "Sign in to continue."}, status_code=401)
+    response = await call_next(request)
+    for k, v in HEADERS.items():
+        response.headers.setdefault(k, v)
+    if path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+class Login(BaseModel):
+    password: str = Field(max_length=500)
+
+
+@app.get("/api/session")
+def session(request: Request):
+    with db.tx() as conn:
+        signed_in = auth.valid(conn, request.cookies.get(auth.COOKIE))
+    return {"signed_in": signed_in, "configured": auth.configured()}
+
+
+@app.post("/api/login")
+def login(body: Login, request: Request, response: Response):
+    if not auth.configured():
+        raise HTTPException(503, f"Set MONAT_PASSWORD (at least {auth.MIN_LENGTH} characters) in the server’s .env, then restart Monat.")
+    ip = request.client.host if request.client else "?"
+    wait = auth.retry_after(ip)
+    if wait:
+        minutes = max(1, round(wait / 60))
+        raise HTTPException(429, f"Too many attempts. Try again in {minutes} {'minute' if minutes == 1 else 'minutes'}.",
+                            headers={"Retry-After": str(wait)})
+    if not auth.check_password(body.password, ip):
+        raise HTTPException(401, "That password didn’t work.")
+    with db.tx() as conn:
+        token = auth.create_session(conn, request.headers.get("user-agent", ""))
+    response.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict",
+                        secure=request.url.scheme == "https", path="/")
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+def logout(request: Request, response: Response):
+    with db.tx() as conn:
+        auth.end_session(conn, request.cookies.get(auth.COOKIE))
+    response.delete_cookie(auth.COOKIE, path="/")
+    return {"ok": True}
 
 
 def state(conn) -> dict:

@@ -8,6 +8,7 @@ import { Inbox, shortName } from './screens/inbox.js';
 import { Txn } from './screens/txn.js';
 import { Budgets, Edit, blankDraft } from './screens/budgets.js';
 import { Settings, Notifications } from './screens/settings.js';
+import { Login } from './screens/login.js';
 
 const TABS = [['home', 'Overview', 'tabHome'], ['tx', 'Transactions', 'tabTx'], ['budgets', 'Budgets', 'tabBud'], ['settings', 'Settings', 'tabSet']];
 const CACHE_KEY = 'monat:state';
@@ -17,13 +18,14 @@ async function api(method, path, body) {
   if (!r.ok) {
     let msg;
     try { msg = (await r.json()).detail; } catch { /* not JSON */ }
-    throw new Error(typeof msg === 'string' ? msg : `Something went wrong (${r.status}).`);
+    throw Object.assign(new Error(typeof msg === 'string' ? msg : `Something went wrong (${r.status}).`), { auth: r.status === 401 });
   }
   return r.json();
 }
 
 const remember = data => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* storage unavailable */ } };
 const recall = () => { try { return JSON.parse(localStorage.getItem(CACHE_KEY)); } catch { return null; } };
+const forget = () => { try { localStorage.removeItem(CACHE_KEY); } catch { /* storage unavailable */ } };
 
 class App extends Component {
   state = {
@@ -48,6 +50,7 @@ class App extends Component {
     try {
       this.setData(await api('GET', '/api/state'));
     } catch (e) {
+      if (e.auth) return this.signedOut();
       if (quiet) return;
       const cached = recall();
       if (cached) { this.setData(cached); this.toast('Offline. Showing what Monat had at the last visit.'); }
@@ -95,7 +98,22 @@ class App extends Component {
     this.setState({ toast: { text, undo: undo || null } });
     this.toastTimer = setTimeout(() => this.setState({ toast: null }), 4200);
   }
-  fail = e => { this.toast(e.message); this.load(true); };
+  fail = e => { if (e.auth) return this.signedOut(); this.toast(e.message); this.load(true); };
+
+  // ── Session ───────────────────────────────────────────────────────────────
+  // Drop everything on screen and in storage; the login page takes over.
+  signedOut = () => {
+    forget();
+    clearTimeout(this.toastTimer);
+    this.scrolls = [];
+    this.modelFor = null;
+    this.setState({ data: null, signedOut: true, tab: 'home', stack: [], month: null, focus: null, toast: null, notes: {}, q: '', filter: 'all' });
+  };
+  signIn = () => { this.setState({ signedOut: false }); this.load(); };
+  signOut = async () => {
+    try { await fetch('/api/logout', { method: 'POST' }); } catch { /* signed out locally either way */ }
+    this.signedOut();
+  };
 
   // ── Actions ───────────────────────────────────────────────────────────────
   // Change local data immediately, then let the server's answer replace it.
@@ -189,7 +207,7 @@ class App extends Component {
       const [data] = await Promise.all([api(cooling ? 'GET' : 'POST', cooling ? '/api/state' : '/api/sync'), new Promise(r => setTimeout(r, 700))]);
       this.setData(data);
       this.toast(cooling ? `Up to date. You can sync with ING again at ${this.syncAgainAt()}.` : data.message || 'Synced with ING.');
-    } catch (e) { this.toast(e.message); }
+    } catch (e) { if (e.auth) return this.signedOut(); this.toast(e.message); }
     this.setState({ syncing: false, pull: 0 });
   };
 
@@ -252,6 +270,7 @@ class App extends Component {
 
   // ── Render ────────────────────────────────────────────────────────────────
   render(_, s) {
+    if (s.signedOut) return html`<${Login} onSignedIn=${this.signIn} />`;
     if (!s.data) return html`<div class="boot" role="status">${s.bootError || ''}</div>`;
     if (this.modelFor !== s.data) { this.model = buildModel(s.data); this.modelFor = s.data; }
     const model = this.model;
@@ -267,7 +286,7 @@ class App extends Component {
     const app = { state: { ...s, month }, data: s.data, model, md, backLabel, gest: this.gest, cooldown,
       set: this.set, go: this.go, push: this.push, pop: this.pop, shiftMonth: this.shiftMonth, sync: this.sync, openNotifs: this.openNotifs,
       assign: this.assign, setCategory: this.setCategory, learn: this.learn, editNote: this.editNote, flushNote: this.flushNote,
-      saveDraft: this.saveDraft, deleteDraft: this.deleteDraft, patchSettings: this.patchSettings };
+      saveDraft: this.saveDraft, deleteDraft: this.deleteDraft, patchSettings: this.patchSettings, signOut: this.signOut };
 
     const screen = {
       home: () => html`<${Home} app=${app} />`,

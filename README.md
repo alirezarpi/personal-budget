@@ -11,20 +11,69 @@ canvas is in the Claude Design project "Monat Budget".
 
 ## Deploy with Docker
 
+### Behind the invisibleservices edge (monat.alirezarpi.com)
+
+The landing server's edge nginx terminates HTTPS and proxies `monat.alirezarpi.com` to `monat:8765` on the
+shared `edge-apps` Docker network. That part is in the `invisibleservices` repo: `landing_proxied_sites` in
+`cac/inventory/group_vars/live-landing.yml`, and `src/landing-page/DEPLOY.md` §9. Monat itself runs without Caddy:
+
 ```bash
-cp .env.example .env          # fill in FINTS_USER, FINTS_PIN, FINTS_PRODUCT_ID
+git clone git@github.com:alirezarpi/personal-budget.git /opt/monat && cd /opt/monat
+cp .env.example .env    # uncomment COMPOSE_FILE=…:docker-compose.edge.yml; set MONAT_PASSWORD and the FINTS_* values
 docker compose up -d --build
-docker compose run --rm monat python -m app.sync --setup   # once: pick the TAN method, confirm a TAN if ING asks
+docker compose run --rm monat python -m app.sync --setup   # once: connect to ING, confirm a TAN if asked
 ```
 
-Data lives in the `monat-data` volume at `/data/monat.db`. The port is only bound to `127.0.0.1`.
-To reach the app from your phone, put it on your tailnet over HTTPS, which iOS requires before it will install a PWA:
+### Standalone, with Caddy
+
+On a server without its own proxy, Caddy (profile `caddy`) takes ports 80 and 443 and gets the
+Let's Encrypt certificate for `MONAT_DOMAIN` itself. It needs DNS pointing at the server and ports 80/443 open.
 
 ```bash
-tailscale serve --bg 8765
+cp .env.example .env    # MONAT_DOMAIN, MONAT_PASSWORD, FINTS_*
+docker compose --profile caddy up -d --build
+docker compose run --rm monat python -m app.sync --setup
 ```
 
-Then open `https://<server>.<tailnet>.ts.net` in Safari, tap Share, and choose **Add to Home Screen**.
+Either way, open the HTTPS address, sign in, and on the iPhone tap Share → **Add to Home Screen**.
+The app's data lives in the `monat-data` volume; keep it. The app is also reachable at `http://localhost:8765`,
+but only from the server itself.
+
+### If nginx already uses ports 80 and 443 on that server
+
+Caddy can't start next to another proxy on the same ports. In that case, start only the app with
+`docker compose up -d --build monat`, and give nginx a site for the subdomain:
+
+```nginx
+server {
+    server_name monat.alirezarpi.com;
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, so clients can't fake their IP
+    }
+    listen 80;
+}
+```
+
+Then run `sudo certbot --nginx -d monat.alirezarpi.com` for HTTPS.
+
+To take a backup:
+
+```bash
+docker compose exec monat python -c "import sqlite3; sqlite3.connect('/data/monat.db').backup(sqlite3.connect('/data/backup.db'))"
+```
+
+### Sign-in
+
+The whole API is behind a single password, `MONAT_PASSWORD` in `.env`, at least 12 characters:
+- A sign-in lasts 90 days per device; **Sign out** is in Settings.
+- Changing the password and restarting signs out every device.
+- Failed attempts are limited to 5 per IP address in 15 minutes and 20 overall per hour.
+- Changes must come from Monat's own pages; requests from other sites are refused.
+- Responses carry a strict Content-Security-Policy, and API responses are never cached.
 
 To take a backup:
 
@@ -52,15 +101,16 @@ docker compose exec monat python -c "import sqlite3; sqlite3.connect('/data/mona
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-MONAT_DEMO=1 .venv/bin/uvicorn app.main:app --reload --port 8765
+MONAT_DEMO=1 MONAT_PASSWORD='a long dev password' .venv/bin/uvicorn app.main:app --reload --port 8765
 ```
 
-`MONAT_DEMO=1` seeds the month from the design (Wednesday 21 October 2026, with history from May), pins the clock to
+Set `MONAT_PASSWORD` here too; the app asks for it. `MONAT_DEMO=1` seeds the month from the design (Wednesday 21 October 2026, with history from May), pins the clock to
 that day, and fakes the sync. Delete the database file to reseed it.
 
 | Path | What |
 |---|---|
-| `app/main.py` | API and scheduler. `GET /api/state` returns everything; every change returns the new state. |
+| `app/main.py` | API, sign-in gate, scheduler. `GET /api/state` returns everything; every change returns the new state. |
+| `app/auth.py` | Password check, sessions, sign-in rate limits |
 | `app/sync.py` | FinTS fetch, MT940 → transactions, sync status |
 | `app/db.py`, `app/seed.py` | Schema, settings, default categories, demo data |
 | `app/categorize.py` | Inbox suggestions and learned merchant rules |

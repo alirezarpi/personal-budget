@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,     -- SHA-256 of the cookie value; the token itself is never stored
+  created_at TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  user_agent TEXT NOT NULL DEFAULT ''
+);
 """
 
 DEFAULT_SETTINGS = {
@@ -108,10 +114,11 @@ def set_setting(conn, key, value):
 
 
 def init():
-    from . import seed
+    from . import auth, seed
 
     with tx() as conn:
         conn.executescript(SCHEMA)
+        auth.init(conn)
         if not conn.execute("SELECT 1 FROM categories LIMIT 1").fetchone():
             seed.categories(conn)
             if DEMO:
