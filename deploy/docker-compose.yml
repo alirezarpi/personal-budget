@@ -1,0 +1,44 @@
+# Production: Monat on the landing server, behind the invisibleservices edge nginx,
+# which serves https://monat.alirezarpi.com and proxies to monat:8765 on edge-apps.
+#
+# The server needs only this file and a .env beside it (see ../.env.example).
+# The image comes from Docker Hub (scripts/publish.sh pushes it).
+#
+#   docker compose pull && docker compose up -d
+#
+# Pin MONAT_IMAGE to alirezarpi/monat:<commit> in .env for a rollback.
+
+name: monat
+
+services:
+  monat:
+    image: ${MONAT_IMAGE:-alirezarpi/monat:latest}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8765:8765"     # for checks from the server itself; the public way in is the edge
+    volumes:
+      - monat-data:/data          # the database; keep this volume
+    networks:
+      - default
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  monat-data:
+
+networks:
+  edge:
+    external: true
+    name: edge-apps               # created by the invisibleservices landing play

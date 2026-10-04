@@ -1,7 +1,7 @@
 services:
   monat:
     build: .
-    image: monat:latest
+    image: ${MONAT_IMAGE:-alirezarpi/monat:latest}
     restart: unless-stopped
     env_file: .env
     # Only for checks from this machine (http://localhost:8765). The public way in is Caddy.
@@ -11,7 +11,7 @@ services:
       - monat-data:/data
 
   # Only for a server without its own reverse proxy: `docker compose --profile caddy up -d`.
-  # Behind an existing edge (like the invisibleservices landing nginx), use docker-compose.edge.yml instead.
+  # Behind the invisibleservices edge, deploy with deploy/docker-compose.yml instead.
   caddy:
     image: caddy:2
     profiles: [caddy]

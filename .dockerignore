@@ -7,3 +7,5 @@ docs
 tools
 **/__pycache__
 *.db
+deploy
+scripts

@@ -14,15 +14,26 @@ canvas is in the Claude Design project "Monat Budget".
 ### Behind the invisibleservices edge (monat.alirezarpi.com)
 
 The landing server's edge nginx terminates HTTPS and proxies `monat.alirezarpi.com` to `monat:8765` on the
-shared `edge-apps` Docker network. That part is in the `invisibleservices` repo: `landing_proxied_sites` in
-`cac/inventory/group_vars/live-landing.yml`, and `src/landing-page/DEPLOY.md` §9. Monat itself runs without Caddy:
+shared `edge-apps` Docker network. That part lives in the `invisibleservices` repo (`landing_proxied_sites`,
+`src/landing-page/DEPLOY.md` §9). Monat runs from a Docker Hub image; the server never builds.
+
+**Publish** from your laptop, after committing:
 
 ```bash
-git clone git@github.com:alirezarpi/personal-budget.git /opt/monat && cd /opt/monat
-cp .env.example .env    # uncomment COMPOSE_FILE=…:docker-compose.edge.yml; set MONAT_PASSWORD and the FINTS_* values
-docker compose up -d --build
+docker login                 # once, as alirezarpi
+./scripts/publish.sh         # pushes alirezarpi/monat:latest and alirezarpi/monat:<commit>
+```
+
+**Run** on the server, from `/opt/monatapp`. It holds only `docker-compose.yml`, copied from
+[`deploy/docker-compose.yml`](deploy/docker-compose.yml), and `.env`:
+
+```bash
+docker compose pull && docker compose up -d
 docker compose run --rm monat python -m app.sync --setup   # once: connect to ING, confirm a TAN if asked
 ```
+
+To update, publish again, then run `docker compose pull && docker compose up -d` on the server. To roll back, set
+`MONAT_IMAGE=alirezarpi/monat:<commit>` in `.env` and run the same command.
 
 ### Standalone, with Caddy
 
