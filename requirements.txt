@@ -1,0 +1,3 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+fints==5.0.0  # the version ing-scripts ran with (released 2026-01-06, script committed 2026-01-20)

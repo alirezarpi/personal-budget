@@ -1,0 +1,14 @@
+services:
+  monat:
+    build: .
+    image: monat:latest
+    restart: unless-stopped
+    env_file: .env
+    # Only reachable from the server itself; `tailscale serve --bg 8765` puts it on your tailnet over HTTPS.
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - monat-data:/data
+
+volumes:
+  monat-data:
