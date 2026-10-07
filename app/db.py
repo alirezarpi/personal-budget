@@ -56,7 +56,15 @@ CREATE TABLE IF NOT EXISTS notifications (
   body TEXT NOT NULL,
   created_at TEXT NOT NULL,
   target TEXT,
-  read INTEGER NOT NULL DEFAULT 0
+  read INTEGER NOT NULL DEFAULT 0,
+  key TEXT                         -- what makes it unique, so an alert is sent once (app/alerts.py)
+);
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  endpoint TEXT PRIMARY KEY,       -- one per device that turned notifications on
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -120,6 +128,9 @@ def _migrate(conn):
         conn.execute("ALTER TABLE transactions ADD COLUMN cat_source TEXT")
         conn.execute("ALTER TABLE transactions ADD COLUMN cat_rule INTEGER")
         conn.execute("UPDATE transactions SET cat_source = 'manual' WHERE category_id IS NOT NULL")
+    if "key" not in {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}:
+        conn.execute("ALTER TABLE notifications ADD COLUMN key TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS notifications_key ON notifications(key)")
 
 
 def init():

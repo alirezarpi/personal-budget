@@ -21,7 +21,7 @@ import re
 import threading
 from datetime import date, datetime, timedelta
 
-from . import db
+from . import alerts, db, push
 from .categorize import INTERMEDIARIES, paypal_merchant, recategorize
 
 log = logging.getLogger("monat.sync")
@@ -238,21 +238,25 @@ def run(interactive: bool = False, manual: bool = False, cooldown: bool = True, 
             results = fetch(start, interactive, choose_tan)
         except Exception as e:  # noqa: BLE001 — every failure becomes a status the app can show
             if isinstance(e, NeedsTAN):
-                msg = "ING is asking for a TAN. Run the setup on the server to confirm it."
+                title, msg = "ING needs a TAN", "ING is asking for a TAN. Run the setup on the server to confirm it."
             elif isinstance(e, LoginRefused):
                 said = f" ING said: “{e.bank[-1].rstrip('.')}”." if e.bank else ""
-                msg = ("ING rejected the PIN." if e.pin else "ING refused the login.") + said + \
-                    " Automatic syncing is paused so the login doesn’t get locked."
+                title = "ING rejected the PIN" if e.pin else "ING refused the login"
+                msg = title + "." + said + " Automatic syncing is paused so the login doesn’t get locked."
             else:
                 log.exception("sync failed")
-                msg = "Couldn’t reach ING. Monat tries again at the next scheduled sync."
+                title, msg = "Couldn’t sync with ING", "Couldn’t reach ING. Monat tries again at the next scheduled sync."
             with db.tx() as conn:
                 _status(conn, status="error", message=msg,
                         blocked=_pin_fingerprint() if isinstance(e, LoginRefused) else None)
+                # The app's own sync button already shows the problem; the schedule has nobody watching.
+                items = [] if manual or interactive else alerts.sync_failed(conn, title, msg, prev.get("status") == "error")
+            push.send(items)
             return msg
 
         with db.tx() as conn:
             rows = to_rows(results)
+            known = {r[0] for r in conn.execute("SELECT id FROM transactions")}
             before = conn.total_changes
             conn.executemany(
                 "INSERT OR IGNORE INTO transactions(id, date, time, booked, amount, merchant, raw, purpose, method, iban)"
@@ -261,6 +265,8 @@ def run(interactive: bool = False, manual: bool = False, cooldown: bool = True, 
             )
             new = conn.total_changes - before
             recategorize(conn)
+            # The first sync brings 90 days of history; that isn't news.
+            items = alerts.after_sync(conn, [r[0] for r in rows if r[0] not in known]) if last else []
             if results:
                 iban = results[0][0]
                 db.set_setting(conn, "account", {"name": os.getenv("FINTS_ACCOUNT_NAME", "Girokonto"),
@@ -268,6 +274,7 @@ def run(interactive: bool = False, manual: bool = False, cooldown: bool = True, 
                                                  "short": "··" + iban[-6:-2]})
             _status(conn, status="ok", message=None, blocked=None, last=db.now().isoformat(timespec="minutes"))
         log.info("sync ok: %d new of %d", new, len(rows))
+        push.send(items)
         if new:
             return f"Synced with ING. {new} new {'payment' if new == 1 else 'payments'}."
         return f"Synced with ING. No new payments since {last[11:16]}." if last else "Synced with ING."

@@ -1,16 +1,33 @@
 import { html } from '../vendor/preact-htm.js';
 import { icon, glyph } from '../lib/icons.js';
-import { ord, parseDateTime, dayDiff, WEEKDAYS, dayMonth, relDayTime, iso } from '../lib/format.js';
+import { money, ord, parseDateTime, dayDiff, WEEKDAYS, dayMonth, relDayTime, iso } from '../lib/format.js';
 import { Back, Toggle, Seg } from '../ui.js';
 
-const PREFS = [
+const PREFS = push => [
   ['approach', 'Approaching a limit', 'At each category’s alert threshold'],
   ['reached', 'Limit reached', 'When a category hits 100%'],
   ['over', 'Over a limit', 'Each time spending goes past it'],
-  ['large', 'Large payments', 'Single payments over €150'],
-  ['daily', 'Daily summary', 'Once a day, in the morning'],
+  ['large', 'Large payments', `Single payments over ${money(push.large)}`],
+  ['daily', 'Daily summary', `Every morning at ${String(push.daily_hour).padStart(2, '0')}:00`],
   ['sync', 'Sync problems', 'When ING needs a TAN or sync fails'],
 ];
+
+// This device's notifications: how to get them, whether they're on, and a test.
+function PushDevice({ app }) {
+  const st = app.state.push, n = app.data.push.devices;
+  const note = text => html`<p class="callout" style="color:var(--ink);line-height:1.4;padding:12px 0;border-bottom:0.5px solid var(--line);text-wrap:pretty">${text}</p>`;
+  if (st === null) return html`<div class="kv"><span>This device</span><span>Checking…</span></div>`;
+  if (st === 'install') return note('To get notifications on iPhone, add Monat to your Home Screen (Share → Add to Home Screen), open it from there and turn them on here. Needs iOS 16.4 or later.');
+  if (st === 'unsupported') return note('This browser can’t receive notifications. On iPhone, open Monat from its Home Screen icon; it needs iOS 16.4 or later.');
+  if (st === 'denied') return note('Notifications are blocked for Monat. Allow them in the iPhone’s Settings → Notifications → Monat, then come back here.');
+  if (st === 'on') return html`
+    <div class="kv"><span>This device</span><span>On${n > 1 ? ` · ${n} devices in all` : ''}</span></div>
+    <button class="kv" onClick=${app.testPush}><span>Send a test notification</span><span></span></button>
+    <button class="kv" onClick=${app.disablePush}><span style="color:var(--over)">Turn off on this device</span><span></span></button>`;
+  return html`
+    <button class="primary" onClick=${app.enablePush} disabled=${st === 'busy'}>${st === 'busy' ? 'Waiting for permission…' : 'Turn on notifications'}</button>
+    <p class="foot" style="margin-top:8px">Alerts arrive after each sync with ING, so up to ${app.data.sync_minutes >= 60 ? app.data.sync_minutes / 60 + ' hours' : app.data.sync_minutes + ' minutes'} after a payment is booked.${n ? ` ${n} other ${n === 1 ? 'device gets' : 'devices get'} them already.` : ''}</p>`;
+}
 
 // every(120, 'Every') → "Every 2 hours" · every(60, 'One manual sync') → "One manual sync every hour"
 const every = (min, lead) => {
@@ -51,7 +68,8 @@ export function Settings({ app }) {
     <p class="foot" style="margin-top:8px">${every(data.cooldown_minutes, 'One manual sync')}, so ING doesn’t see a stream of logins. It also moves the next scheduled sync.</p>
 
     <div class="caps">Notifications</div>
-    ${PREFS.map(([k, label, sub]) => html`
+    <${PushDevice} app=${app} />
+    ${PREFS(data.push).map(([k, label, sub]) => html`
       <div key=${k} class="switch-row">
         <div><div class="t">${label}</div><div class="s">${sub}</div></div>
         <${Toggle} on=${prefs[k]} label=${label} onClick=${() => app.patchSettings({ prefs: { [k]: !prefs[k] } })} />
@@ -82,12 +100,7 @@ export function Notifications({ app }) {
     if (!g || g.label !== label) groups.push(g = { label, items: [] });
     g.items.push(n);
   }
-  const go = target => {
-    if (!target) return;
-    if (target === 'inbox') app.push({ t: 'inbox' });
-    else if (target === 'settings') app.go('settings');
-    else if (target.startsWith('cat:')) app.push({ t: 'cat', id: target.slice(4) });
-  };
+  const go = target => app.openTarget(target);
 
   return html`
   <div>

@@ -24,6 +24,11 @@ async function api(method, path, body) {
   return r.json();
 }
 
+// The server's VAPID public key, as the browser's push manager wants it.
+const keyBytes = b64 => Uint8Array.from(atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - b64.length % 4) % 4)), c => c.charCodeAt(0));
+const sameKey = (buf, b64) => { if (!buf) return false; const a = new Uint8Array(buf), b = keyBytes(b64); return a.length === b.length && a.every((x, i) => x === b[i]); };
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timeout')), ms))]);
+
 const remember = data => { try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* storage unavailable */ } };
 const recall = () => { try { return JSON.parse(localStorage.getItem(CACHE_KEY)); } catch { return null; } };
 const forget = () => { try { localStorage.removeItem(CACHE_KEY); } catch { /* storage unavailable */ } };
@@ -35,12 +40,21 @@ class App extends Component {
     q: '', filter: 'all', swipe: null, expanded: {}, remember: {}, notes: {},
     toast: null, pull: 0, pulling: false, dx: 0, dragging: false, syncing: false,
     draft: null, picker: false, saving: false, confirmDelete: false,
+    push: null,      // this device: 'install' | 'unsupported' | 'denied' | 'off' | 'busy' | 'on'
   };
   gest = {};       // in-flight gesture state, kept off React state so re-renders don't reset it
   scrolls = [];    // scroll offsets of the screens under the current one
   noteTimers = {};
 
   componentDidMount() {
+    // Opened from a notification: Monat starts on the screen it's about.
+    const open = new URLSearchParams(location.search).get('open');
+    if (open) { this.pendingOpen = open; history.replaceState(null, '', '/'); }
+    if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+      if (!e.data || !('open' in e.data)) return;
+      this.load(true);
+      if (e.data.open) this.openTarget(e.data.open, true);
+    });
     this.load();
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && this.state.data) this.load(true); });
     // The server syncs on its own schedule; pick up what it found while the app stays open.
@@ -61,7 +75,10 @@ class App extends Component {
 
   setData(data) {
     this.fetchedAt = Date.now();
-    this.setState({ data });
+    this.setState({ data }, () => {
+      if (this.pendingOpen) { const t = this.pendingOpen; this.pendingOpen = null; this.openTarget(t, true); }
+      if (!this.pushChecked && data.push) { this.pushChecked = true; this.checkPush(); }
+    });
     remember(data);
     // Re-render when the sync button's cooldown runs out.
     clearTimeout(this.cooldownTimer);
@@ -221,6 +238,77 @@ class App extends Component {
     return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
   }
 
+  // Where an alert points: 'cat:<id>', 'inbox' or 'settings'. `fresh` starts from the tab instead of
+  // stacking on the current screen, for a tap on a notification.
+  openTarget = (target, fresh) => {
+    if (!target || !this.state.data) return;
+    if (target === 'settings') return this.go('settings');
+    const entry = target === 'inbox' ? { t: 'inbox' } : target.startsWith('cat:') ? { t: 'cat', id: target.slice(4) } : null;
+    if (!entry || (entry.t === 'cat' && !this.state.data.categories.some(c => c.id === entry.id))) return;
+    if (!fresh) return this.push(entry);
+    this.scrolls = [0];
+    this.setState({ tab: entry.t === 'inbox' ? 'tx' : 'home', stack: [entry], month: null, focus: null }, () => this.top());
+  };
+
+  // ── Push notifications ────────────────────────────────────────────────────
+  // iPhone: iOS 16.4+, and only in the app opened from the Home Screen.
+  async checkPush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+      const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+      return this.setState({ push: ios && !standalone ? 'install' : 'unsupported' });
+    }
+    if (Notification.permission === 'denied') return this.setState({ push: 'denied' });
+    try {
+      const reg = await withTimeout(navigator.serviceWorker.ready, 8000);
+      let sub = await reg.pushManager.getSubscription();
+      if (sub && !sameKey(sub.options.applicationServerKey, this.state.data.push.key)) { await sub.unsubscribe(); sub = null; }
+      // Check in, so the server still knows this device after a restore or a new database.
+      if (sub && Notification.permission === 'granted') api('POST', '/api/push/subscribe', sub.toJSON()).then(d => this.setData(d), () => {});
+      this.setState({ push: sub && Notification.permission === 'granted' ? 'on' : 'off' });
+    } catch { this.setState({ push: 'unsupported' }); }
+  }
+
+  enablePush = async () => {
+    this.setState({ push: 'busy' });
+    try {
+      const perm = await Notification.requestPermission();   // iOS only asks from a tap, so this comes first
+      if (perm !== 'granted') return this.setState({ push: perm === 'denied' ? 'denied' : 'off' });
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(this.state.data.push.key) });
+      this.setData(await api('POST', '/api/push/subscribe', sub.toJSON()));
+      this.setState({ push: 'on' });
+      this.toast('Notifications are on for this device.');
+    } catch (e) {
+      if (e.auth) return this.signedOut();
+      this.setState({ push: 'off' });
+      this.toast(e.name === 'Error' ? e.message : 'Couldn’t turn on notifications on this device.');   // API errors carry Monat's own text
+    }
+  };
+
+  disablePush = async () => {
+    this.setState({ push: 'busy' });
+    try {
+      const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+      if (sub) {
+        this.setData(await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }));
+        await sub.unsubscribe();
+      }
+      this.setState({ push: 'off' });
+      this.toast('Notifications are off for this device.');
+    } catch (e) { if (e.auth) return this.signedOut(); this.setState({ push: 'on' }); this.toast(e.message); }
+  };
+
+  testPush = async () => {
+    try {
+      const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+      if (!sub) return this.setState({ push: 'off' });
+      const data = await api('POST', '/api/push/test', { endpoint: sub.endpoint });
+      this.setData(data);
+      this.toast(data.message);
+    } catch (e) { this.fail(e); }
+  };
+
   openNotifs = () => {
     this.push({ t: 'notifs' });
     if (this.state.data.notifications.some(n => !n.read)) {
@@ -290,7 +378,8 @@ class App extends Component {
     const app = { state: { ...s, month }, data: s.data, model, md, backLabel, gest: this.gest, cooldown,
       set: this.set, go: this.go, push: this.push, pop: this.pop, shiftMonth: this.shiftMonth, sync: this.sync, openNotifs: this.openNotifs,
       assign: this.assign, setCategory: this.setCategory, learn: this.learn, editNote: this.editNote, flushNote: this.flushNote,
-      saveDraft: this.saveDraft, deleteDraft: this.deleteDraft, patchSettings: this.patchSettings, signOut: this.signOut };
+      saveDraft: this.saveDraft, deleteDraft: this.deleteDraft, patchSettings: this.patchSettings, signOut: this.signOut,
+      openTarget: this.openTarget, enablePush: this.enablePush, disablePush: this.disablePush, testPush: this.testPush };
 
     const screen = {
       home: () => html`<${Home} app=${app} />`,

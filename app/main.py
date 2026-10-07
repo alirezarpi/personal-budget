@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, db, sync
+from . import alerts, auth, db, push, sync
 from .categorize import FIELDS, learn_pattern, matches, matching, norm, recategorize, suggest
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -35,14 +35,29 @@ async def sync_forever():
             await asyncio.sleep(60)
 
 
+async def daily_forever():
+    """The morning summary, at DAILY_SUMMARY_HOUR (08:00 unless set)."""
+    while True:
+        await asyncio.sleep(max(1.0, alerts.daily_wait()))
+        try:
+            await asyncio.to_thread(alerts.run_daily)
+        except Exception:  # noqa: BLE001
+            log.exception("daily summary crashed")
+            await asyncio.sleep(600)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
-    task = None
-    if not db.DEMO and sync.configured():
-        task = asyncio.create_task(sync_forever())
+    with db.tx() as conn:
+        push.keys(conn)  # made once, on first start
+    tasks = []
+    if not db.DEMO:
+        tasks.append(asyncio.create_task(daily_forever()))
+        if sync.configured():
+            tasks.append(asyncio.create_task(sync_forever()))
     yield
-    if task:
+    for task in tasks:
         task.cancel()
 
 
@@ -145,7 +160,7 @@ def state(conn) -> dict:
             "learned": t["category_id"] is not None and any(r["category_id"] == t["category_id"] and matches(r, t) for r in rules),
             "suggest": suggest(t, rules, cat_ids, fallback) if t["category_id"] is None and out_ else [],
         })
-    notifs = [dict(r) for r in conn.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 200")]
+    notifs = [dict(r) for r in conn.execute("SELECT id, kind, title, body, created_at, target, read FROM notifications ORDER BY created_at DESC, id DESC LIMIT 200")]
     for n in notifs:
         n["read"] = bool(n["read"])
     out = {
@@ -158,6 +173,8 @@ def state(conn) -> dict:
                    "min": r["min_amount"], "max": r["max_amount"]} for r in rules],
         "transactions": txns,
         "notifications": notifs,
+        "push": {"key": push.keys(conn)["public"], "devices": conn.execute("SELECT COUNT(*) FROM push_subscriptions").fetchone()[0],
+                 "daily_hour": alerts.DAILY_HOUR, "large": alerts.LARGE},
         "settings": {k: db.get_setting(conn, k) for k in db.DEFAULT_SETTINGS},
     }
     sync_status = dict(out["settings"]["sync"] or {})
@@ -349,6 +366,50 @@ def read_notifications():
     with db.tx() as conn:
         conn.execute("UPDATE notifications SET read = 1 WHERE read = 0")
         return state(conn)
+
+
+class PushSub(BaseModel):
+    endpoint: str = Field(max_length=2000)
+    keys: dict[str, str]
+
+
+class PushEndpoint(BaseModel):
+    endpoint: str = Field(max_length=2000)
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(body: PushSub, request: Request):
+    """A device turned notifications on (or the app checked in again with its subscription)."""
+    p256dh, auth_key = body.keys.get("p256dh", ""), body.keys.get("auth", "")
+    if not push.allowed(body.endpoint):
+        raise HTTPException(400, "That isn’t a push service Monat knows.")
+    if len(p256dh) > 200 or len(auth_key) > 100 or not push.valid_keys(p256dh, auth_key):
+        raise HTTPException(400, "The device sent push keys Monat can’t use.")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    with db.tx() as conn:
+        push.subscribe(conn, body.endpoint, p256dh, auth_key, request.headers.get("user-agent", ""), f"{proto}://{host}")
+        return state(conn)
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(body: PushEndpoint):
+    with db.tx() as conn:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (body.endpoint,))
+        return state(conn)
+
+
+@app.post("/api/push/test")
+def push_test(body: PushEndpoint):
+    with db.tx() as conn:
+        if not conn.execute("SELECT 1 FROM push_subscriptions WHERE endpoint = ?", (body.endpoint,)).fetchone():
+            raise HTTPException(404, "This device isn’t registered. Turn notifications off and on again.")
+    errors = push.send([{"title": "Notifications are on", "body": "This is how Monat’s alerts will look on this device.",
+                         "target": "settings", "tag": "test"}], endpoint=body.endpoint)
+    with db.tx() as conn:
+        s = state(conn)
+    s["message"] = f"The test didn’t go through: {errors[0].rstrip('.')}." if errors else "Test sent. It should arrive in a few seconds."
+    return s
 
 
 @app.post("/api/sync")

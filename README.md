@@ -115,6 +115,24 @@ docker compose exec monat python -c "import sqlite3; sqlite3.connect('/data/mona
   command again and confirm it.
 - **Wrong PIN:** automatic syncing pauses until the PIN in `.env` changes, so retries can't lock your ING login.
 
+## Notifications
+
+Turn them on per device in **Settings → Notifications**. On iPhone this needs iOS 16.4 or later and Monat opened
+from its Home Screen icon; in a Safari tab the button isn't offered. Each device that turns them on gets every alert,
+and each alert also lands in the bell on the overview.
+
+- **After each sync:** a category reaching its alert threshold, reaching its limit, or each payment that lands
+  while it's over; and payments over €150. Fixed costs only get the large-payment alert ("marked as paid").
+- **Every morning at 08:00** (`DAILY_SUMMARY_HOUR`): yesterday's spending and what's safe to spend today; on the
+  first day of a budget month, how the last one closed. If the server was down at 08:00 it goes out by noon.
+- **Sync problems:** once when the scheduled sync starts failing (a TAN, a refused PIN, ING unreachable).
+- Each alert is sent once. Payments from the first sync, or older than four days when they arrive, stay quiet.
+- The switches in Settings choose which kinds are sent. Alerts come at most one sync after a payment is booked.
+
+The server makes its push keys (VAPID) on first start and keeps them in the database. Apple wants the sender's
+address in every push; Monat uses the https address you turned notifications on from, or `VAPID_SUBJECT`
+(`mailto:you@example.com` or an https URL) if set.
+
 ## Develop
 
 ```bash
@@ -131,6 +149,7 @@ that day, and fakes the sync. Delete the database file to reseed it.
 | `app/auth.py` | Password check, sessions, sign-in rate limits |
 | `app/sync.py` | FinTS fetch, MT940 → transactions, sync status |
 | `app/db.py`, `app/seed.py` | Schema, settings, default categories, demo data |
+| `app/alerts.py`, `app/push.py` | Which alerts to send and when; Web Push to registered devices |
 | `app/categorize.py` | Filing rules: matching, the catch-all, refiling, inbox suggestions |
 | `web/js/lib/rules.js` | The same matching in the browser, for the rule editor's live preview |
 | `web/js/lib/budget.js` | Budget months (including payday months), category states, safe to spend, summary copy |
@@ -139,7 +158,5 @@ that day, and fakes the sync. Delete the database file to reseed it.
 
 ## Not built yet
 
-- **Push notifications and alert generation.** The copy and triggers are specified in the design (Web Push with
-  VAPID, iOS 16.4+). For now the in-app history only shows the demo alerts.
 - **Carry-over.** The flag is saved per category, but it doesn't change next month's limit yet.
 - **PDF summary export.** Only CSV export exists.
